@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from "vue";
+import { ref, onMounted, onUnmounted, nextTick } from "vue";
 import { getCurrentWindow, currentMonitor } from "@tauri-apps/api/window";
-import { PhysicalPosition, LogicalSize } from "@tauri-apps/api/dpi";
+import { PhysicalPosition } from "@tauri-apps/api/dpi";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
@@ -185,9 +185,38 @@ function createRipple(e: MouseEvent) {
 
 // ── Settings panel ────────────────────────────────────────────────────────────
 
+const TOPIC_DESCRIPTIONS: Record<string, string> = {
+  "ak.wwise.core.audio.imported":                       "音频文件导入时",
+  "ak.wwise.core.object.attenuationCurveChanged":       "衰减曲线修改时",
+  "ak.wwise.core.object.attenuationCurveLinkChanged":   "衰减曲线链接变更时",
+  "ak.wwise.core.object.childAdded":                    "子对象添加时",
+  "ak.wwise.core.object.childRemoved":                  "子对象移除时",
+  "ak.wwise.core.object.created":                       "对象创建时",
+  "ak.wwise.core.object.curveChanged":                  "曲线修改时",
+  "ak.wwise.core.object.nameChanged":                   "对象重命名时",
+  "ak.wwise.core.object.notesChanged":                  "备注修改时",
+  "ak.wwise.core.object.postDeleted":                   "对象删除后",
+  "ak.wwise.core.object.propertyChanged":               "对象属性修改时",
+  "ak.wwise.core.object.referenceChanged":              "对象引用变更时",
+  "ak.wwise.core.object.structureChanged":              "对象结构变更时",
+  "ak.wwise.core.project.loaded":                       "项目加载时",
+  "ak.wwise.core.project.postClosed":                   "项目关闭后",
+  "ak.wwise.core.project.saved":                        "项目保存时",
+  "ak.wwise.core.soundbank.generated":                  "Sound Bank 生成时",
+  "ak.wwise.core.soundbank.generationDone":             "Sound Bank 生成完成时",
+  "ak.wwise.core.switchContainer.assignmentAdded":      "Switch 容器分配添加时",
+  "ak.wwise.core.switchContainer.assignmentRemoved":    "Switch 容器分配移除时",
+  "ak.wwise.core.transport.stateChanged":               "传输状态变更时",
+  "ak.wwise.ui.selectionChanged":                       "选中对象变更时",
+};
+
 function topicLabel(uri: string): string {
   const parts = uri.split(".");
   return parts.slice(-2).join(".");
+}
+
+function topicDescription(uri: string): string {
+  return TOPIC_DESCRIPTIONS[uri] ?? uri;
 }
 
 function parsePortRange(s: string): { start: number; end: number } | null {
@@ -215,7 +244,7 @@ async function openSettings() {
   portRangeError.value = "";
   showSettings.value = true;
   windowLogicalH.value = SETTINGS_HEIGHT;
-  await appWindow.setSize(new LogicalSize(320, SETTINGS_HEIGHT));
+  await invoke("set_window_height", { height: SETTINGS_HEIGHT });
 }
 
 async function closeSettings() {
@@ -223,8 +252,9 @@ async function closeSettings() {
   settingsDraft.value = null;
   if (resetConfirmTimer) clearTimeout(resetConfirmTimer);
   resetConfirm.value = false;
+  await nextTick(); // wait for DOM to shrink before resizing the window
   windowLogicalH.value = MAIN_HEIGHT;
-  await appWindow.setSize(new LogicalSize(320, MAIN_HEIGHT));
+  await invoke("set_window_height", { height: MAIN_HEIGHT });
 }
 
 async function applySettings() {
@@ -448,7 +478,7 @@ function segClass(i: number, active: boolean) {
               :checked="topic.enabled"
               @change="settingsDraft!.topics[idx].enabled = ($event.target as HTMLInputElement).checked"
             />
-            <span class="s-topic-name" :title="topic.uri">{{ topicLabel(topic.uri) }}</span>
+            <span class="s-topic-name" :title="topicDescription(topic.uri)">{{ topicLabel(topic.uri) }}</span>
             <input
               type="number"
               class="s-score-input"

@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, LogicalSize, Manager};
 use tokio::net::TcpStream;
 use tokio::sync::Notify;
 use tokio::time::{sleep, timeout, Duration, Instant};
@@ -532,6 +532,15 @@ fn save_settings(
 }
 
 #[tauri::command]
+fn set_window_height(height: f64, app: tauri::AppHandle) {
+    if let Some(win) = app.get_webview_window("main") {
+        // Clear any minimum-size constraint first so the window can shrink.
+        let _ = win.set_min_size(None::<LogicalSize<f64>>);
+        let _ = win.set_size(LogicalSize::new(320.0_f64, height));
+    }
+}
+
+#[tauri::command]
 fn get_default_settings() -> UserSettings {
     UserSettings::default()
 }
@@ -672,6 +681,7 @@ pub fn run() {
             get_default_settings,
             save_settings,
             reset_total_score,
+            set_window_height,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
