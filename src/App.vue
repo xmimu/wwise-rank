@@ -8,9 +8,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 interface ScorePayload {
   total_score: number;
   session_score: number;
-  selection_count: number;
-  name_count: number;
-  created_count: number;
+  event_counts: Record<string, number>;
   state: "Idle" | "Scanning" | "Connected";
   recent_events: number;
 }
