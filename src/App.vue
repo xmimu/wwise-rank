@@ -2,14 +2,65 @@
 import { ref, onMounted, onUnmounted } from "vue";
 import { getCurrentWindow, currentMonitor } from "@tauri-apps/api/window";
 import { PhysicalPosition } from "@tauri-apps/api/dpi";
+import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+
+interface ScorePayload {
+  total_score: number;
+  session_score: number;
+  selection_count: number;
+  name_count: number;
+  created_count: number;
+  state: "Idle" | "Scanning" | "Connected";
+  recent_events: number;
+}
 
 const appWindow = getCurrentWindow();
 const pinned = ref(true);
 const snapped = ref(false);
 
+// Score / connection state
+const totalScore = ref(0);
+const sessionScore = ref(0);
+const connState = ref<"Idle" | "Scanning" | "Connected">("Idle");
+const recentEvents = ref(0);
+
 const SNAP_PX = 24; // 距边缘多少像素内触发吸附
 let snapTimer: ReturnType<typeof setTimeout> | null = null;
 let unlistenMoved: (() => void) | null = null;
+let unlistenScore: UnlistenFn | null = null;
+
+// #region agent log
+let dbgPayloadIngress = 0;
+// #endregion
+
+function applyPayload(p: ScorePayload) {
+  // #region agent log
+  if (dbgPayloadIngress < 28) {
+    dbgPayloadIngress++;
+    fetch("http://127.0.0.1:7655/ingest/b745c231-98ac-4235-84c6-91081f552b83", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Debug-Session-Id": "9347d3",
+      },
+      body: JSON.stringify({
+        sessionId: "9347d3",
+        location: "App.vue:applyPayload",
+        message: "score_payload_applied",
+        data: { state: p.state, session_score: p.session_score },
+        timestamp: Date.now(),
+        hypothesisId: "H5",
+        runId: "post-fix-2",
+      }),
+    }).catch(() => {});
+  }
+  // #endregion
+  totalScore.value = p.total_score;
+  sessionScore.value = p.session_score;
+  connState.value = p.state;
+  recentEvents.value = p.recent_events;
+}
 
 function startDrag(e: MouseEvent) {
   if (e.button === 0) {
@@ -62,10 +113,24 @@ onMounted(async () => {
     if (snapTimer) clearTimeout(snapTimer);
     snapTimer = setTimeout(snapToEdge, 120);
   });
+
+  // Load initial score state immediately on mount
+  try {
+    const initial = await invoke<ScorePayload>("get_score");
+    applyPayload(initial);
+  } catch (_) {
+    // backend not ready yet — will arrive via event
+  }
+
+  // Subscribe to live updates
+  unlistenScore = await listen<ScorePayload>("score-updated", (e) => {
+    applyPayload(e.payload);
+  });
 });
 
 onUnmounted(() => {
   unlistenMoved?.();
+  unlistenScore?.();
   if (snapTimer) clearTimeout(snapTimer);
 });
 </script>
@@ -103,28 +168,28 @@ onUnmounted(() => {
       <!-- 三栏读数 -->
       <div class="readouts">
         <div class="readout">
-          <div class="val">—</div>
+          <div class="val">{{ totalScore }}</div>
           <div class="key">RANK</div>
         </div>
         <div class="r-sep"></div>
         <div class="readout">
-          <div class="val">—</div>
+          <div class="val">{{ sessionScore }}</div>
           <div class="key">SCORE</div>
         </div>
         <div class="r-sep"></div>
         <div class="readout">
-          <div class="val idle">IDLE</div>
+          <div class="val state-val" :class="connState.toLowerCase()">{{ connState.toUpperCase() }}</div>
           <div class="key">STATE</div>
         </div>
       </div>
 
-      <!-- VU 电平条 -->
+      <!-- VU 电平条 (活动指示器) -->
       <div class="vu-row">
-        <span class="vu-lbl">SIG</span>
+        <span class="vu-lbl">ACT</span>
         <div class="vu-meter">
-          <div v-for="i in 24" :key="i" class="seg"></div>
+          <div v-for="i in 24" :key="i" class="seg" :class="{ on: i <= recentEvents }"></div>
         </div>
-        <span class="vu-db">–∞</span>
+        <span class="vu-db">{{ recentEvents > 0 ? recentEvents : '–' }}</span>
       </div>
 
       <!-- 操作按钮 -->
@@ -320,10 +385,24 @@ html, body, #app {
   font-feature-settings: "tnum";
 }
 
-.val.idle {
-  font-size: 14px;
-  color: var(--green);
+.state-val {
+  font-size: 13px;
   letter-spacing: 1px;
+}
+.state-val.idle {
+  color: var(--muted);
+}
+.state-val.scanning {
+  color: var(--accent);
+  animation: pulse 1s ease-in-out infinite;
+}
+.state-val.connected {
+  color: var(--green);
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.4; }
 }
 
 .key {
@@ -370,9 +449,11 @@ html, body, #app {
   height: 8px;
   border-radius: 1px;
   background: var(--seg-off);
-  transition: background 0.05s;
+  transition: background 0.15s;
 }
-/* 当有真实信号时可切换 .seg.on { background: var(--accent); } */
+.seg.on {
+  background: var(--accent);
+}
 
 /* ── 操作按钮 ──────────────────────────────── */
 .actions {
