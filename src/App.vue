@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from "vue";
 import { getCurrentWindow, currentMonitor } from "@tauri-apps/api/window";
-import { PhysicalPosition } from "@tauri-apps/api/dpi";
+import { PhysicalPosition, LogicalSize } from "@tauri-apps/api/dpi";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
@@ -11,6 +11,18 @@ interface ScorePayload {
   event_counts: Record<string, number>;
   state: "Idle" | "Scanning" | "Connected";
   recent_events: number;
+}
+
+interface TopicSetting {
+  uri: string;
+  score: number;
+  enabled: boolean;
+}
+
+interface UserSettings {
+  port_start: number;
+  port_end: number;
+  topics: TopicSetting[];
 }
 
 const appWindow = getCurrentWindow();
@@ -32,7 +44,20 @@ const rankFlash = ref(false);
 const scoreFlash = ref(false);
 const stateFlash = ref(false);
 
-const SNAP_PX = 24;
+// Settings panel state
+const showSettings = ref(false);
+const settingsDraft = ref<UserSettings | null>(null);
+const portRangeInput = ref("");
+const resetConfirm = ref(false);
+let resetConfirmTimer: ReturnType<typeof setTimeout> | null = null;
+
+const MAIN_HEIGHT = 200;
+const SETTINGS_HEIGHT = 420;
+
+// Track logical window height ourselves so snapToEdge never reads a stale outerSize().
+const windowLogicalH = ref(MAIN_HEIGHT);
+
+const SNAP_PX = 80;
 let snapTimer: ReturnType<typeof setTimeout> | null = null;
 let unlistenMoved: (() => void) | null = null;
 let unlistenScore: UnlistenFn | null = null;
@@ -50,7 +75,7 @@ function animateTo(
   const start = performance.now();
   function step(now: number) {
     const t = Math.min((now - start) / duration, 1);
-    const eased = 1 - (1 - t) ** 3; // ease-out cubic
+    const eased = 1 - (1 - t) ** 3;
     displayRef.value = Math.round(from + (to - from) * eased);
     if (t < 1) {
       frameIdHolder.id = requestAnimationFrame(step);
@@ -115,19 +140,20 @@ async function togglePin() {
 }
 
 async function snapToEdge() {
-  const [pos, monitor, size] = await Promise.all([
+  const [pos, monitor] = await Promise.all([
     appWindow.outerPosition(),
     currentMonitor(),
-    appWindow.outerSize(),
   ]);
   if (!monitor) return;
 
+  const scale = monitor.scaleFactor;
   const mx = monitor.position.x;
   const my = monitor.position.y;
   const mw = monitor.size.width;
   const mh = monitor.size.height;
-  const ww = size.width;
-  const wh = size.height;
+  // Use our tracked logical size to avoid stale outerSize() readings after resize.
+  const ww = Math.round(320 * scale);
+  const wh = Math.round(windowLogicalH.value * scale);
 
   let nx = pos.x;
   let ny = pos.y;
@@ -157,6 +183,92 @@ function createRipple(e: MouseEvent) {
   setTimeout(() => ripple.remove(), 650);
 }
 
+// ── Settings panel ────────────────────────────────────────────────────────────
+
+function topicLabel(uri: string): string {
+  const parts = uri.split(".");
+  return parts.slice(-2).join(".");
+}
+
+function parsePortRange(s: string): { start: number; end: number } | null {
+  const single = s.match(/^(\d{1,5})$/);
+  if (single) {
+    const p = parseInt(single[1]);
+    if (p >= 1 && p <= 65535) return { start: p, end: p };
+  }
+  const range = s.match(/^(\d{1,5})-(\d{1,5})$/);
+  if (range) {
+    const a = parseInt(range[1]);
+    const b = parseInt(range[2]);
+    if (a >= 1 && a <= 65535 && b >= a && b <= 65535) return { start: a, end: b };
+  }
+  return null;
+}
+
+const portRangeError = ref("");
+
+async function openSettings() {
+  const s = await invoke<UserSettings>("get_settings");
+  settingsDraft.value = JSON.parse(JSON.stringify(s)) as UserSettings;
+  portRangeInput.value =
+    s.port_start === s.port_end ? `${s.port_start}` : `${s.port_start}-${s.port_end}`;
+  portRangeError.value = "";
+  showSettings.value = true;
+  windowLogicalH.value = SETTINGS_HEIGHT;
+  await appWindow.setSize(new LogicalSize(320, SETTINGS_HEIGHT));
+}
+
+async function closeSettings() {
+  showSettings.value = false;
+  settingsDraft.value = null;
+  if (resetConfirmTimer) clearTimeout(resetConfirmTimer);
+  resetConfirm.value = false;
+  windowLogicalH.value = MAIN_HEIGHT;
+  await appWindow.setSize(new LogicalSize(320, MAIN_HEIGHT));
+}
+
+async function applySettings() {
+  if (!settingsDraft.value) return;
+  const parsed = parsePortRange(portRangeInput.value.trim());
+  if (!parsed) {
+    portRangeError.value = "格式无效，请输入如 8080 或 8080-8090";
+    return;
+  }
+  const payload: UserSettings = {
+    port_start: parsed.start,
+    port_end: parsed.end,
+    topics: settingsDraft.value.topics,
+  };
+  await invoke("save_settings", { newSettings: payload });
+  await closeSettings();
+}
+
+async function resetToDefaults() {
+  const defaults = await invoke<UserSettings>("get_default_settings");
+  settingsDraft.value = defaults;
+  portRangeInput.value =
+    defaults.port_start === defaults.port_end
+      ? `${defaults.port_start}`
+      : `${defaults.port_start}-${defaults.port_end}`;
+  portRangeError.value = "";
+}
+
+async function resetScore() {
+  if (!resetConfirm.value) {
+    // First click: ask for confirmation
+    resetConfirm.value = true;
+    if (resetConfirmTimer) clearTimeout(resetConfirmTimer);
+    resetConfirmTimer = setTimeout(() => {
+      resetConfirm.value = false;
+    }, 3000);
+    return;
+  }
+  // Second click: execute
+  if (resetConfirmTimer) clearTimeout(resetConfirmTimer);
+  resetConfirm.value = false;
+  await invoke("reset_total_score");
+}
+
 onMounted(async () => {
   unlistenMoved = await appWindow.onMoved(() => {
     if (snapTimer) clearTimeout(snapTimer);
@@ -166,7 +278,6 @@ onMounted(async () => {
   try {
     const initial = await invoke<ScorePayload>("get_score");
     applyPayload(initial);
-    // Seed display values without animation on first load
     displayTotal.value = initial.total_score;
     displaySession.value = initial.session_score;
   } catch (_) {
@@ -187,6 +298,7 @@ onUnmounted(() => {
   if (rankFlashHolder.timer) clearTimeout(rankFlashHolder.timer);
   if (scoreFlashHolder.timer) clearTimeout(scoreFlashHolder.timer);
   if (stateFlashHolder.timer) clearTimeout(stateFlashHolder.timer);
+  if (resetConfirmTimer) clearTimeout(resetConfirmTimer);
 });
 
 // Segment zone classification
@@ -205,11 +317,12 @@ function segClass(i: number, active: boolean) {
       snapped,
       scanning: connState === 'Scanning',
       connected: connState === 'Connected',
+      'settings-open': showSettings,
     }"
     @contextmenu.prevent
   >
     <!-- 扫描线覆盖层 (仅 Scanning 状态) -->
-    <div v-if="connState === 'Scanning'" class="scan-overlay" aria-hidden="true">
+    <div v-if="connState === 'Scanning' && !showSettings" class="scan-overlay" aria-hidden="true">
       <div class="scan-line"></div>
     </div>
 
@@ -255,8 +368,8 @@ function segClass(i: number, active: boolean) {
       </div>
     </header>
 
-    <!-- 主体 -->
-    <main class="body">
+    <!-- 主视图 -->
+    <main v-if="!showSettings" class="body">
       <!-- 三栏读数 -->
       <div class="readouts">
         <div class="readout">
@@ -297,10 +410,76 @@ function segClass(i: number, active: boolean) {
 
       <!-- 操作按钮 -->
       <div class="actions">
-        <button class="btn-fill" @click="createRipple">ANALYZE</button>
-        <button class="btn-ghost" @click="createRipple">SETTINGS</button>
+        <button class="btn-fill" @mousedown="createRipple">ANALYZE</button>
+        <button class="btn-ghost" @mousedown="createRipple" @click="openSettings">SETTINGS</button>
       </div>
     </main>
+
+    <!-- 设置面板 -->
+    <section v-else-if="settingsDraft" class="settings-body">
+      <!-- 端口范围 -->
+      <div class="s-section">
+        <div class="s-label">PORT RANGE</div>
+        <div class="s-port-row">
+          <input
+            v-model="portRangeInput"
+            class="s-input"
+            placeholder="8080 或 8080-8090"
+            spellcheck="false"
+            @input="portRangeError = ''"
+          />
+        </div>
+        <div v-if="portRangeError" class="s-error">{{ portRangeError }}</div>
+      </div>
+
+      <!-- URI 订阅列表 -->
+      <div class="s-section s-section-grow">
+        <div class="s-label">URI SUBSCRIPTIONS</div>
+        <div class="s-topic-list">
+          <label
+            v-for="(topic, idx) in settingsDraft.topics"
+            :key="topic.uri"
+            class="s-topic-row"
+            :class="{ disabled: !topic.enabled }"
+          >
+            <input
+              type="checkbox"
+              class="s-checkbox"
+              :checked="topic.enabled"
+              @change="settingsDraft!.topics[idx].enabled = ($event.target as HTMLInputElement).checked"
+            />
+            <span class="s-topic-name" :title="topic.uri">{{ topicLabel(topic.uri) }}</span>
+            <input
+              type="number"
+              class="s-score-input"
+              :value="topic.score"
+              min="0"
+              max="9999"
+              :disabled="!topic.enabled"
+              @change="settingsDraft!.topics[idx].score = Math.max(0, parseInt(($event.target as HTMLInputElement).value) || 0)"
+            />
+          </label>
+        </div>
+      </div>
+
+      <!-- 重置总分 -->
+      <div class="s-section">
+        <button
+          class="btn-reset"
+          :class="{ 'btn-reset-confirm': resetConfirm }"
+          @click="resetScore"
+        >
+          {{ resetConfirm ? "再次点击确认重置" : "RESET TOTAL SCORE" }}
+        </button>
+      </div>
+
+      <!-- 保存 / 取消 / 恢复默认 -->
+      <div class="s-actions">
+        <button class="btn-fill s-btn" @mousedown="createRipple" @click="applySettings">SAVE</button>
+        <button class="btn-ghost s-btn" @mousedown="createRipple" @click="closeSettings">CANCEL</button>
+        <button class="btn-ghost s-btn s-btn-defaults" @mousedown="createRipple" @click="resetToDefaults" title="恢复默认设置">↺</button>
+      </div>
+    </section>
   </div>
 </template>
 
@@ -367,6 +546,10 @@ body,
   position: relative;
 }
 
+.widget.settings-open {
+  height: 420px;
+}
+
 @keyframes mount {
   from {
     opacity: 0;
@@ -378,7 +561,7 @@ body,
   }
 }
 
-/* Connected 状态 — 顶边绿色微光 */
+/* Connected 状态 */
 .widget.connected {
   border-top-color: var(--green);
   box-shadow:
@@ -584,7 +767,6 @@ body,
   transition: color 0.2s ease;
 }
 
-/* 数值变化闪光 */
 .val.flash {
   animation: val-flash 0.5s var(--ease-out-quint);
 }
@@ -623,7 +805,6 @@ body,
   color: var(--green);
 }
 
-/* 状态切换闪光 (叠加在 state-val 动画上) */
 .state-val.flash {
   animation: state-flash 0.6s var(--ease-out-quint);
 }
@@ -703,13 +884,11 @@ body,
   align-items: center;
 }
 
-/* 亮起时快速响应，熄灭时缓慢衰减 */
 .seg {
   flex: 1;
   height: 8px;
   border-radius: 1px;
   background: var(--seg-off);
-  /* 熄灭时慢衰减 */
   transition:
     background 0.28s ease,
     box-shadow 0.28s ease;
@@ -717,7 +896,6 @@ body,
 .seg.on {
   background: var(--accent);
   box-shadow: 0 0 4px var(--accent);
-  /* 亮起时快速响应 */
   transition:
     background 0.05s ease,
     box-shadow 0.05s ease;
@@ -794,6 +972,209 @@ body,
   transform: scale(0.97);
 }
 
+/* ── 设置面板 ──────────────────────────────── */
+.settings-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  padding: 10px 14px 10px;
+  gap: 8px;
+  overflow: hidden;
+}
+
+.s-section {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.s-section-grow {
+  flex: 1;
+  min-height: 0;
+}
+
+.s-label {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 1.8px;
+  color: var(--muted);
+  text-transform: uppercase;
+}
+
+.s-port-row {
+  display: flex;
+  gap: 6px;
+}
+
+.s-input {
+  flex: 1;
+  height: 26px;
+  background: oklch(100% 0 0 / 4%);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  padding: 0 8px;
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+.s-input:focus {
+  border-color: var(--a-dim);
+}
+.s-input::placeholder {
+  color: oklch(35% 0.01 255);
+}
+
+.s-error {
+  font-size: 9px;
+  color: var(--seg-danger);
+  letter-spacing: 0.3px;
+}
+
+/* 滚动列表 */
+.s-topic-list {
+  flex: 1;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  background: oklch(100% 0 0 / 2%);
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
+.s-topic-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  height: 30px;
+  border-bottom: 1px solid oklch(22% 0.015 255 / 50%);
+  cursor: pointer;
+  transition: background 0.1s ease;
+}
+.s-topic-row:last-child {
+  border-bottom: none;
+}
+.s-topic-row:hover {
+  background: oklch(100% 0 0 / 3%);
+}
+.s-topic-row.disabled .s-topic-name {
+  color: oklch(30% 0.01 255);
+}
+
+.s-checkbox {
+  flex-shrink: 0;
+  width: 12px;
+  height: 12px;
+  cursor: pointer;
+  accent-color: var(--accent);
+}
+
+.s-topic-name {
+  flex: 1;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.s-score-input {
+  width: 44px;
+  height: 22px;
+  background: oklch(100% 0 0 / 5%);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  color: var(--accent);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  font-feature-settings: "tnum";
+  text-align: center;
+  outline: none;
+  padding: 0 4px;
+  transition: border-color 0.15s ease;
+  /* hide spinners */
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+.s-score-input::-webkit-inner-spin-button,
+.s-score-input::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+}
+.s-score-input:focus {
+  border-color: var(--a-dim);
+}
+.s-score-input:disabled {
+  color: oklch(30% 0.01 255);
+  border-color: oklch(18% 0.01 255);
+}
+
+/* 重置按钮 */
+.btn-reset {
+  width: 100%;
+  height: 26px;
+  border-radius: 2px;
+  font-family: inherit;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1.2px;
+  cursor: pointer;
+  background: transparent;
+  border: 1px solid oklch(40% 0.18 22);
+  color: oklch(60% 0.18 22);
+  transition: all 0.15s ease;
+  position: relative;
+  overflow: hidden;
+}
+.btn-reset:hover {
+  background: oklch(60% 0.18 22 / 10%);
+  border-color: oklch(55% 0.2 22);
+  color: oklch(70% 0.2 22);
+}
+.btn-reset.btn-reset-confirm {
+  border-color: oklch(63% 0.24 22);
+  color: oklch(63% 0.24 22);
+  background: oklch(63% 0.24 22 / 12%);
+  animation: reset-pulse 0.6s ease-in-out infinite alternate;
+}
+
+@keyframes reset-pulse {
+  from { box-shadow: none; }
+  to { box-shadow: 0 0 8px oklch(63% 0.24 22 / 40%); }
+}
+
+.s-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.s-btn-defaults {
+  flex: none;
+  width: 32px;
+  font-size: 14px;
+  letter-spacing: 0;
+}
+
+.s-btn {
+  flex: 1;
+  height: 28px;
+  border-radius: 2px;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  position: relative;
+  overflow: hidden;
+}
+
 /* 点击涟漪 */
 :deep(.ripple) {
   position: absolute;
@@ -839,6 +1220,9 @@ body,
   }
   :deep(.ripple) {
     display: none;
+  }
+  .btn-reset.btn-reset-confirm {
+    animation: none;
   }
 }
 </style>

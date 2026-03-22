@@ -5,16 +5,16 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::net::TcpStream;
+use tokio::sync::Notify;
 use tokio::time::{sleep, timeout, Duration, Instant};
 use waapi_rs::{ak, SubscriptionHandle, WaapiClient};
+
+type ReconnectSignal = Arc<Notify>;
 
 const MONITOR_TICK_MS: u64 = 1500;
 const SCORE_FLUSH_INTERVAL_SECS: u64 = 3;
 const BACKOFF_INITIAL_MS: u64 = 1500;
 const BACKOFF_MAX_MS: u64 = 30_000;
-
-/// Ports to probe for WAAPI (Wwise default is 8080, scan a few extras)
-const WAAPI_SCAN_PORTS: &[u16] = &[8080, 8081, 8082, 8083];
 
 // ── Connection configuration ──────────────────────────────────────────────────
 
@@ -55,11 +55,10 @@ fn next_backoff(current_ms: u64, max_ms: u64) -> u64 {
     current_ms.saturating_mul(2).min(max_ms)
 }
 
-// ── Score configuration ───────────────────────────────────────────────────────
+// ── Score configuration defaults ──────────────────────────────────────────────
 
-/// Per-topic score values, loaded from `score_config.json` in the app data
-/// directory. Missing keys fall back to the built-in defaults so users can
-/// partially override the table.
+/// Provides built-in default scores used to seed UserSettings on first run.
+/// Kept as a struct so existing unit tests can reference it directly.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ScoreConfig {
     scores: HashMap<String, u64>,
@@ -95,43 +94,92 @@ impl ScoreConfig {
         .map(|(k, v)| (k.to_string(), v))
         .collect()
     }
+}
 
-    /// Load from `path`. On first run the file does not exist, so write the
-    /// defaults there for the user to inspect and customise, then return them.
-    /// If the file exists but is malformed, log a warning and return defaults.
-    /// Any keys present in the file override their default; missing keys keep
-    /// their default value.
+// ── User settings ─────────────────────────────────────────────────────────────
+
+/// Per-topic settings: score value and whether the subscription is active.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TopicSetting {
+    pub uri: String,
+    pub score: u64,
+    pub enabled: bool,
+}
+
+/// All user-editable settings, persisted to `settings.json`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserSettings {
+    pub port_start: u16,
+    pub port_end: u16,
+    pub topics: Vec<TopicSetting>,
+}
+
+type SharedSettings = Arc<Mutex<UserSettings>>;
+
+/// Topics that are off by default (unsupported by some Wwise versions or noisy).
+const TOPICS_DISABLED_BY_DEFAULT: &[&str] = &[
+    ak::wwise::core::OBJECT_PROPERTY_CHANGED,
+    "ak.wwise.core.object.structureChanged",
+    ak::wwise::core::TRANSPORT_STATE_CHANGED,
+];
+
+impl Default for UserSettings {
+    fn default() -> Self {
+        let defaults = ScoreConfig::defaults();
+        let topics = TOPICS
+            .iter()
+            .map(|&uri| TopicSetting {
+                uri: uri.to_string(),
+                score: defaults.get(uri).copied().unwrap_or(1),
+                enabled: !TOPICS_DISABLED_BY_DEFAULT.contains(&uri),
+            })
+            .collect();
+        UserSettings {
+            port_start: 8080,
+            port_end: 8083,
+            topics,
+        }
+    }
+}
+
+impl UserSettings {
+    /// Load from `path`, falling back to defaults. Unknown topics in the file
+    /// are preserved; topics missing from the file are filled with defaults.
     fn load_or_default(path: &PathBuf) -> Self {
-        let defaults = Self::defaults();
-
         match std::fs::read_to_string(path) {
-            Ok(content) => match serde_json::from_str::<HashMap<String, u64>>(&content) {
+            Ok(content) => match serde_json::from_str::<UserSettings>(&content) {
                 Ok(mut loaded) => {
-                    for (k, v) in &defaults {
-                        loaded.entry(k.clone()).or_insert(*v);
+                    // Ensure every known topic is present (forward-compat).
+                    let defaults = ScoreConfig::defaults();
+                    for &uri in TOPICS {
+                        if !loaded.topics.iter().any(|t| t.uri == uri) {
+                            loaded.topics.push(TopicSetting {
+                                uri: uri.to_string(),
+                                score: defaults.get(uri).copied().unwrap_or(1),
+                                enabled: true,
+                            });
+                        }
                     }
-                    ScoreConfig { scores: loaded }
+                    loaded
                 }
                 Err(e) => {
-                    eprintln!("[wwise-rank] failed to parse score_config.json: {e}, using defaults");
-                    ScoreConfig { scores: defaults }
+                    eprintln!("[wwise-rank] failed to parse settings.json: {e}, using defaults");
+                    Self::default()
                 }
             },
-            Err(_) => {
-                // First run – write defaults so the user can customise them
-                if let Ok(data) = serde_json::to_string_pretty(&defaults) {
-                    let _ = std::fs::write(path, data);
-                }
-                ScoreConfig { scores: defaults }
-            }
+            Err(_) => Self::default(),
+        }
+    }
+
+    fn save(&self, path: &PathBuf) {
+        if let Ok(data) = serde_json::to_string_pretty(self) {
+            let _ = std::fs::write(path, data);
         }
     }
 }
 
 // ── Subscribed topics ─────────────────────────────────────────────────────────
 
-/// All WAAPI topics to subscribe to, in the order they will be attempted.
-/// Scores are looked up at runtime from `ScoreConfig`.
 const TOPICS: &[&str] = &[
     ak::wwise::core::AUDIO_IMPORTED,
     ak::wwise::core::OBJECT_ATTENUATION_CURVE_CHANGED,
@@ -162,8 +210,6 @@ const TOPICS: &[&str] = &[
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct ScoreData {
     total_score: u64,
-    /// Per-topic event counts. Old `score.json` files that lack this field
-    /// will deserialise with an empty map, preserving `total_score`.
     #[serde(default)]
     event_counts: HashMap<String, u64>,
 }
@@ -175,7 +221,6 @@ enum ConnState {
     Connected,
 }
 
-/// Payload sent to the frontend via the "score-updated" event.
 #[derive(Debug, Clone, Serialize)]
 pub struct ScorePayload {
     pub total_score: u64,
@@ -188,9 +233,9 @@ pub struct ScorePayload {
 struct AppState {
     score: ScoreData,
     score_dirty: bool,
-    session_score: u64, // resets each launch, not persisted
+    session_score: u64,
     conn_state: ConnState,
-    recent_events: u32, // drives VU meter, decays over time
+    recent_events: u32,
 }
 
 type SharedState = Arc<Mutex<AppState>>;
@@ -231,10 +276,10 @@ fn set_conn_state(shared: &SharedState, app: &AppHandle, new_state: ConnState) {
     }
 }
 
-/// Ports that accept TCP on 127.0.0.1, in scan order (8080 first).
-async fn tcp_open_waapi_ports(config: Arc<Config>) -> Vec<u16> {
+/// Probe ports in [start, end] on 127.0.0.1, return those that accept TCP.
+async fn tcp_open_ports_in_range(start: u16, end: u16, config: &Arc<Config>) -> Vec<u16> {
     let mut join_handles = Vec::new();
-    for &port in WAAPI_SCAN_PORTS {
+    for port in start..=end {
         let probe_timeout = config.tcp_probe_timeout;
         join_handles.push(tokio::spawn(async move {
             let ok = timeout(
@@ -254,15 +299,12 @@ async fn tcp_open_waapi_ports(config: Arc<Config>) -> Vec<u16> {
             ports.push(p);
         }
     }
-
-    ports.sort_unstable_by_key(|p| WAAPI_SCAN_PORTS.iter().position(|x| x == p).unwrap_or(usize::MAX));
+    ports.sort_unstable();
     ports
 }
 
 // ── Subscribe helper ──────────────────────────────────────────────────────────
 
-/// Attempt to subscribe to a single topic. Returns the handle on success.
-/// On failure, logs the error and returns `None` (subscription is optional).
 async fn subscribe_one(
     client: &WaapiClient,
     topic: &'static str,
@@ -300,14 +342,12 @@ async fn subscribe_one(
 
 // ── WAAPI connect + subscribe ─────────────────────────────────────────────────
 
-/// Attempts a full WAAPI handshake and subscriptions on `port`.
-/// Returns `None` if this port is not WAAPI or no subscriptions succeed.
 async fn try_connect(
     port: u16,
     app: &AppHandle,
     shared: &SharedState,
     config: &Arc<Config>,
-    score_config: &Arc<ScoreConfig>,
+    settings: &UserSettings,
 ) -> Option<(WaapiClient, Vec<SubscriptionHandle>)> {
     let url = format!("ws://127.0.0.1:{}/waapi", port);
 
@@ -316,7 +356,6 @@ async fn try_connect(
         _ => return None,
     };
 
-    // Ping core to confirm the Authoring API is ready before subscribing.
     match timeout(config.getinfo_timeout, client.call(ak::wwise::core::GET_INFO, None, None)).await {
         Ok(Ok(_)) => {}
         _ => {
@@ -328,12 +367,19 @@ async fn try_connect(
     let mut handles: Vec<SubscriptionHandle> = Vec::new();
 
     for &topic in TOPICS {
-        let score = score_config.scores.get(topic).copied().unwrap_or(0);
+        // Look up this topic in user settings; skip if disabled.
+        let topic_cfg = settings.topics.iter().find(|t| t.uri == topic);
+        let enabled = topic_cfg.map_or(true, |t| t.enabled);
+        if !enabled {
+            continue;
+        }
+        let score = topic_cfg.map_or(1, |t| t.score);
+
         if let Some(h) = subscribe_one(
             &client,
             topic,
             score,
-            Arc::clone(shared),  // SharedState = Arc<Mutex<AppState>>, clone is just Arc::clone
+            Arc::clone(shared),
             app.clone(),
             config.subscribe_timeout,
         )
@@ -359,16 +405,25 @@ async fn monitor_loop(
     app: AppHandle,
     data_path: PathBuf,
     config: Arc<Config>,
-    score_config: Arc<ScoreConfig>,
+    shared_settings: SharedSettings,
+    reconnect_signal: ReconnectSignal,
 ) {
     let mut last_score_flush = Instant::now();
     let mut backoff_ms: u64 = config.backoff_initial_ms;
 
     loop {
-        sleep(Duration::from_millis(backoff_ms)).await;
+        // Read current settings at the start of each cycle.
+        let settings = shared_settings.lock().unwrap_or_else(|e| e.into_inner()).clone();
 
-        // Probe TCP ports – skip scan entirely if nothing is listening.
-        let candidates = tcp_open_waapi_ports(Arc::clone(&config)).await;
+        // Backoff wait — wake immediately if settings change.
+        tokio::select! {
+            _ = sleep(Duration::from_millis(backoff_ms)) => {}
+            _ = reconnect_signal.notified() => {
+                backoff_ms = config.backoff_initial_ms;
+            }
+        }
+
+        let candidates = tcp_open_ports_in_range(settings.port_start, settings.port_end, &config).await;
         if candidates.is_empty() {
             set_conn_state(&shared, &app, ConnState::Idle);
             backoff_ms = next_backoff(backoff_ms, config.backoff_max_ms);
@@ -377,10 +432,9 @@ async fn monitor_loop(
 
         set_conn_state(&shared, &app, ConnState::Scanning);
 
-        // Try each candidate port until one succeeds.
         let mut connection: Option<(WaapiClient, Vec<SubscriptionHandle>)> = None;
         for port in candidates {
-            if let Some(conn) = try_connect(port, &app, &shared, &config, &score_config).await {
+            if let Some(conn) = try_connect(port, &app, &shared, &config, &settings).await {
                 connection = Some(conn);
                 break;
             }
@@ -398,44 +452,50 @@ async fn monitor_loop(
         set_conn_state(&shared, &app, ConnState::Connected);
         backoff_ms = config.backoff_initial_ms;
 
-        // Connected – poll until the event loop dies.
-        while client.is_connected() {
-            sleep(Duration::from_millis(MONITOR_TICK_MS)).await;
+        // Connected — poll until disconnected or settings changed.
+        'connected: loop {
+            tokio::select! {
+                _ = sleep(Duration::from_millis(MONITOR_TICK_MS)) => {
+                    let score_to_flush = {
+                        let mut st = shared.lock().unwrap_or_else(|e| e.into_inner());
+                        if st.score_dirty && last_score_flush.elapsed() >= Duration::from_secs(SCORE_FLUSH_INTERVAL_SECS) {
+                            st.score_dirty = false;
+                            Some(st.score.clone())
+                        } else {
+                            None
+                        }
+                    };
+                    if let Some(snapshot) = score_to_flush {
+                        let flush_path = data_path.clone();
+                        let _ = tokio::task::spawn_blocking(move || save_score(&flush_path, &snapshot)).await;
+                        last_score_flush = Instant::now();
+                    }
 
-            // Flush score to disk in batches.
-            let score_to_flush = {
-                let mut st = shared.lock().unwrap_or_else(|e| e.into_inner());
-                if st.score_dirty && last_score_flush.elapsed() >= Duration::from_secs(SCORE_FLUSH_INTERVAL_SECS) {
-                    st.score_dirty = false;
-                    Some(st.score.clone())
-                } else {
-                    None
+                    let mut st = shared.lock().unwrap_or_else(|e| e.into_inner());
+                    if st.recent_events > 0 {
+                        st.recent_events = st.recent_events.saturating_sub(2);
+                        emit_state(&app, &st);
+                    }
+
+                    if !client.is_connected() {
+                        break 'connected;
+                    }
                 }
-            };
-            if let Some(snapshot) = score_to_flush {
-                let flush_path = data_path.clone();
-                let _ = tokio::task::spawn_blocking(move || save_score(&flush_path, &snapshot)).await;
-                last_score_flush = Instant::now();
-            }
-
-            // Decay VU meter gradually.
-            let mut st = shared.lock().unwrap_or_else(|e| e.into_inner());
-            if st.recent_events > 0 {
-                st.recent_events = st.recent_events.saturating_sub(2);
-                emit_state(&app, &st);
+                _ = reconnect_signal.notified() => {
+                    eprintln!("[wwise-rank] settings changed, reconnecting");
+                    break 'connected;
+                }
             }
         }
 
-        // Wwise closed / network dropped – clean up and retry.
         handles.clear();
+        let _ = timeout(config.disconnect_timeout, client.disconnect()).await;
         set_conn_state(&shared, &app, ConnState::Idle);
     }
 }
 
 // ── Tauri commands ─────────────────────────────────────────────────────────────
 
-/// Called by the frontend on mount to get the initial state without waiting
-/// for the first "score-updated" event.
 #[tauri::command]
 fn get_score(state: tauri::State<SharedState>) -> ScorePayload {
     let st = match state.lock() { Ok(g) => g, Err(e) => e.into_inner() };
@@ -446,6 +506,49 @@ fn get_score(state: tauri::State<SharedState>) -> ScorePayload {
         state: format!("{:?}", st.conn_state),
         recent_events: st.recent_events,
     }
+}
+
+#[tauri::command]
+fn get_settings(settings: tauri::State<SharedSettings>) -> UserSettings {
+    settings.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+#[tauri::command]
+fn save_settings(
+    new_settings: UserSettings,
+    settings: tauri::State<SharedSettings>,
+    reconnect: tauri::State<ReconnectSignal>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let path = data_dir.join("settings.json");
+    {
+        let mut lock = settings.lock().unwrap_or_else(|e| e.into_inner());
+        *lock = new_settings;
+        lock.save(&path);
+    }
+    reconnect.notify_one();
+    Ok(())
+}
+
+#[tauri::command]
+fn get_default_settings() -> UserSettings {
+    UserSettings::default()
+}
+
+#[tauri::command]
+fn reset_total_score(state: tauri::State<SharedState>, app: tauri::AppHandle) {
+    let data_dir = match app.path().app_data_dir() {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    let path = data_dir.join("score.json");
+    let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
+    st.score.total_score = 0;
+    st.score.event_counts.clear();
+    st.score_dirty = false;
+    save_score(&path, &st.score);
+    emit_state(&app, &st);
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────────
@@ -481,14 +584,35 @@ mod tests {
     }
 
     #[test]
-    fn score_config_partial_override() {
-        let tmp = std::env::temp_dir().join("test_score_config.json");
-        let custom = serde_json::json!({"ak.wwise.core.object.created": 99});
-        std::fs::write(&tmp, custom.to_string()).unwrap();
-        let cfg = ScoreConfig::load_or_default(&tmp);
-        assert_eq!(cfg.scores["ak.wwise.core.object.created"], 99);
-        // defaults should fill in other keys
-        assert_eq!(cfg.scores[ak::wwise::ui::SELECTION_CHANGED], 1);
+    fn user_settings_default_covers_all_topics() {
+        let s = UserSettings::default();
+        for &topic in TOPICS {
+            assert!(
+                s.topics.iter().any(|t| t.uri == topic),
+                "missing default topic setting for '{topic}'"
+            );
+        }
+    }
+
+    #[test]
+    fn user_settings_load_or_default_merges_new_topics() {
+        let tmp = std::env::temp_dir().join("test_settings.json");
+        // Write a settings file that's missing some topics
+        let partial = serde_json::json!({
+            "port_start": 9090,
+            "port_end": 9090,
+            "topics": [
+                { "uri": "ak.wwise.core.object.created", "score": 99, "enabled": true }
+            ]
+        });
+        std::fs::write(&tmp, partial.to_string()).unwrap();
+        let loaded = UserSettings::load_or_default(&tmp);
+        assert_eq!(loaded.port_start, 9090);
+        // Custom score preserved
+        let created = loaded.topics.iter().find(|t| t.uri == "ak.wwise.core.object.created").unwrap();
+        assert_eq!(created.score, 99);
+        // Missing topics filled in
+        assert!(loaded.topics.iter().any(|t| t.uri == ak::wwise::ui::SELECTION_CHANGED));
         std::fs::remove_file(&tmp).ok();
     }
 }
@@ -503,10 +627,14 @@ pub fn run() {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
             let score_path = data_dir.join("score.json");
-            let score_config_path = data_dir.join("score_config.json");
+            let settings_path = data_dir.join("settings.json");
 
             let score = load_score(&score_path);
-            let score_config = Arc::new(ScoreConfig::load_or_default(&score_config_path));
+            let user_settings = UserSettings::load_or_default(&settings_path);
+            // Write defaults on first run so the user can inspect the file.
+            if !settings_path.exists() {
+                user_settings.save(&settings_path);
+            }
 
             let shared = Arc::new(Mutex::new(AppState {
                 score,
@@ -516,7 +644,12 @@ pub fn run() {
                 recent_events: 0,
             }));
 
+            let shared_settings = Arc::new(Mutex::new(user_settings));
+            let reconnect_signal = Arc::new(Notify::new());
+
             app.manage(shared.clone());
+            app.manage(shared_settings.clone());
+            app.manage(reconnect_signal.clone());
 
             let config = Arc::new(Config::load_from_env());
             app.manage(config.clone());
@@ -527,12 +660,19 @@ pub fn run() {
                 app_handle,
                 score_path,
                 config,
-                score_config,
+                shared_settings,
+                reconnect_signal,
             ));
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![get_score])
+        .invoke_handler(tauri::generate_handler![
+            get_score,
+            get_settings,
+            get_default_settings,
+            save_settings,
+            reset_total_score,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
