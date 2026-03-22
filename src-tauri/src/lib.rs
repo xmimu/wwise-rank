@@ -279,7 +279,8 @@ async fn subscribe_one(
             st.score.total_score += score;
             st.score_dirty = true;
             st.session_score += score;
-            st.recent_events = (st.recent_events + (score as u32 * 2)).min(24);
+            let boost: u32 = if st.recent_events < 8 { 3 } else if st.recent_events < 16 { 2 } else { 1 };
+            st.recent_events = (st.recent_events + boost).min(24);
             emit_state(&app, &st);
         }),
     )
@@ -420,7 +421,7 @@ async fn monitor_loop(
             // Decay VU meter gradually.
             let mut st = shared.lock().unwrap_or_else(|e| e.into_inner());
             if st.recent_events > 0 {
-                st.recent_events = st.recent_events.saturating_sub(1);
+                st.recent_events = st.recent_events.saturating_sub(2);
                 emit_state(&app, &st);
             }
         }
