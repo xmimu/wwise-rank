@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, nextTick } from "vue";
+import { ref, computed, onMounted, onUnmounted, nextTick } from "vue";
 import { getCurrentWindow, currentMonitor } from "@tauri-apps/api/window";
 import { PhysicalPosition } from "@tauri-apps/api/dpi";
 import { invoke } from "@tauri-apps/api/core";
@@ -43,6 +43,44 @@ const displaySession = ref(0);
 const rankFlash = ref(false);
 const scoreFlash = ref(false);
 const stateFlash = ref(false);
+
+// Language
+type Lang = "zh" | "en";
+const lang = ref<Lang>("zh");
+
+const i18n = {
+  zh: {
+    pinTitle: "置顶",
+    closeTitle: "关闭",
+    portRangePlaceholder: "8080 或 8080-8090",
+    portRangeError: "格式无效，请输入如 8080 或 8080-8090",
+    portRangeLabel: "PORT RANGE",
+    uriSubLabel: "URI SUBSCRIPTIONS",
+    resetScore: "RESET TOTAL SCORE",
+    resetConfirm: "再次点击确认重置",
+    restoreDefaultsTitle: "恢复默认设置",
+    langLabel: "LANGUAGE",
+  },
+  en: {
+    pinTitle: "Pin",
+    closeTitle: "Close",
+    portRangePlaceholder: "8080 or 8080-8090",
+    portRangeError: "Invalid format, use e.g. 8080 or 8080-8090",
+    portRangeLabel: "PORT RANGE",
+    uriSubLabel: "URI SUBSCRIPTIONS",
+    resetScore: "RESET TOTAL SCORE",
+    resetConfirm: "Click again to confirm reset",
+    restoreDefaultsTitle: "Restore defaults",
+    langLabel: "LANGUAGE",
+  },
+};
+
+const t = computed(() => i18n[lang.value]);
+
+function setLang(l: Lang) {
+  lang.value = l;
+  localStorage.setItem("wwise-rank-lang", l);
+}
 
 // Settings panel state
 const showSettings = ref(false);
@@ -185,7 +223,7 @@ function createRipple(e: MouseEvent) {
 
 // ── Settings panel ────────────────────────────────────────────────────────────
 
-const TOPIC_DESCRIPTIONS: Record<string, string> = {
+const TOPIC_DESCRIPTIONS_ZH: Record<string, string> = {
   "ak.wwise.core.audio.imported":                       "音频文件导入时",
   "ak.wwise.core.object.attenuationCurveChanged":       "衰减曲线修改时",
   "ak.wwise.core.object.attenuationCurveLinkChanged":   "衰减曲线链接变更时",
@@ -210,13 +248,39 @@ const TOPIC_DESCRIPTIONS: Record<string, string> = {
   "ak.wwise.ui.selectionChanged":                       "选中对象变更时",
 };
 
+const TOPIC_DESCRIPTIONS_EN: Record<string, string> = {
+  "ak.wwise.core.audio.imported":                       "Audio file imported",
+  "ak.wwise.core.object.attenuationCurveChanged":       "Attenuation curve changed",
+  "ak.wwise.core.object.attenuationCurveLinkChanged":   "Attenuation curve link changed",
+  "ak.wwise.core.object.childAdded":                    "Child object added",
+  "ak.wwise.core.object.childRemoved":                  "Child object removed",
+  "ak.wwise.core.object.created":                       "Object created",
+  "ak.wwise.core.object.curveChanged":                  "Curve changed",
+  "ak.wwise.core.object.nameChanged":                   "Object renamed",
+  "ak.wwise.core.object.notesChanged":                  "Notes changed",
+  "ak.wwise.core.object.postDeleted":                   "Object deleted",
+  "ak.wwise.core.object.propertyChanged":               "Property changed",
+  "ak.wwise.core.object.referenceChanged":              "Reference changed",
+  "ak.wwise.core.object.structureChanged":              "Structure changed",
+  "ak.wwise.core.project.loaded":                       "Project loaded",
+  "ak.wwise.core.project.postClosed":                   "Project closed",
+  "ak.wwise.core.project.saved":                        "Project saved",
+  "ak.wwise.core.soundbank.generated":                  "Sound bank generated",
+  "ak.wwise.core.soundbank.generationDone":             "Sound bank generation done",
+  "ak.wwise.core.switchContainer.assignmentAdded":      "Switch container assignment added",
+  "ak.wwise.core.switchContainer.assignmentRemoved":    "Switch container assignment removed",
+  "ak.wwise.core.transport.stateChanged":               "Transport state changed",
+  "ak.wwise.ui.selectionChanged":                       "Selection changed",
+};
+
 function topicLabel(uri: string): string {
   const parts = uri.split(".");
   return parts.slice(-2).join(".");
 }
 
 function topicDescription(uri: string): string {
-  return TOPIC_DESCRIPTIONS[uri] ?? uri;
+  const map = lang.value === "en" ? TOPIC_DESCRIPTIONS_EN : TOPIC_DESCRIPTIONS_ZH;
+  return map[uri] ?? uri;
 }
 
 function parsePortRange(s: string): { start: number; end: number } | null {
@@ -261,7 +325,7 @@ async function applySettings() {
   if (!settingsDraft.value) return;
   const parsed = parsePortRange(portRangeInput.value.trim());
   if (!parsed) {
-    portRangeError.value = "格式无效，请输入如 8080 或 8080-8090";
+    portRangeError.value = t.value.portRangeError;
     return;
   }
   const payload: UserSettings = {
@@ -300,6 +364,9 @@ async function resetScore() {
 }
 
 onMounted(async () => {
+  const savedLang = localStorage.getItem("wwise-rank-lang") as Lang | null;
+  if (savedLang === "zh" || savedLang === "en") lang.value = savedLang;
+
   unlistenMoved = await appWindow.onMoved(() => {
     if (snapTimer) clearTimeout(snapTimer);
     snapTimer = setTimeout(snapToEdge, 120);
@@ -366,7 +433,7 @@ function segClass(i: number, active: boolean) {
         <button
           class="ico-btn"
           :class="{ 'ico-on': pinned }"
-          title="置顶"
+          :title="t.pinTitle"
           @mousedown.stop
           @click="togglePin"
         >
@@ -382,7 +449,7 @@ function segClass(i: number, active: boolean) {
         </button>
         <button
           class="ico-btn ico-close"
-          title="关闭"
+          :title="t.closeTitle"
           @mousedown.stop
           @click="closeWindow"
         >
@@ -449,12 +516,12 @@ function segClass(i: number, active: boolean) {
     <section v-else-if="settingsDraft" class="settings-body">
       <!-- 端口范围 -->
       <div class="s-section">
-        <div class="s-label">PORT RANGE</div>
+        <div class="s-label">{{ t.portRangeLabel }}</div>
         <div class="s-port-row">
           <input
             v-model="portRangeInput"
             class="s-input"
-            placeholder="8080 或 8080-8090"
+            :placeholder="t.portRangePlaceholder"
             spellcheck="false"
             @input="portRangeError = ''"
           />
@@ -464,7 +531,7 @@ function segClass(i: number, active: boolean) {
 
       <!-- URI 订阅列表 -->
       <div class="s-section s-section-grow">
-        <div class="s-label">URI SUBSCRIPTIONS</div>
+        <div class="s-label">{{ t.uriSubLabel }}</div>
         <div class="s-topic-list">
           <label
             v-for="(topic, idx) in settingsDraft.topics"
@@ -499,15 +566,24 @@ function segClass(i: number, active: boolean) {
           :class="{ 'btn-reset-confirm': resetConfirm }"
           @click="resetScore"
         >
-          {{ resetConfirm ? "再次点击确认重置" : "RESET TOTAL SCORE" }}
+          {{ resetConfirm ? t.resetConfirm : t.resetScore }}
         </button>
+      </div>
+
+      <!-- 语言切换 -->
+      <div class="s-section s-lang-section">
+        <div class="s-label">{{ t.langLabel }}</div>
+        <div class="s-lang-toggle">
+          <button :class="['s-lang-btn', { active: lang === 'zh' }]" @click="setLang('zh')">中文</button>
+          <button :class="['s-lang-btn', { active: lang === 'en' }]" @click="setLang('en')">EN</button>
+        </div>
       </div>
 
       <!-- 保存 / 取消 / 恢复默认 -->
       <div class="s-actions">
         <button class="btn-fill s-btn" @mousedown="createRipple" @click="applySettings">SAVE</button>
         <button class="btn-ghost s-btn" @mousedown="createRipple" @click="closeSettings">CANCEL</button>
-        <button class="btn-ghost s-btn s-btn-defaults" @mousedown="createRipple" @click="resetToDefaults" title="恢复默认设置">↺</button>
+        <button class="btn-ghost s-btn s-btn-defaults" @mousedown="createRipple" @click="resetToDefaults" :title="t.restoreDefaultsTitle">↺</button>
       </div>
     </section>
   </div>
@@ -1203,6 +1279,42 @@ body,
   transition: all 0.15s ease;
   position: relative;
   overflow: hidden;
+}
+
+/* ── 语言切换 ──────────────────────────────── */
+.s-lang-section {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.s-lang-toggle {
+  display: flex;
+  gap: 4px;
+}
+
+.s-lang-btn {
+  height: 20px;
+  padding: 0 8px;
+  border-radius: 2px;
+  font-family: inherit;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  cursor: pointer;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  transition: all 0.15s ease;
+}
+.s-lang-btn:hover {
+  border-color: oklch(35% 0.02 255);
+  color: var(--text);
+}
+.s-lang-btn.active {
+  background: var(--a-glow);
+  border-color: var(--a-dim);
+  color: var(--accent);
 }
 
 /* 点击涟漪 */
