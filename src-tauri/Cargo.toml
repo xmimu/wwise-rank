@@ -1,12 +1,11 @@
 [package]
 name = "wwise-rank"
 version = "0.1.0"
-description = "A Tauri App"
-authors = ["you"]
+description = "Real-time WAAPI activity monitor and gamified score overlay for Wwise audio engineers"
+authors = ["xmimu"]
+license = "MIT"
 edition = "2021"
 default-run = "wwise-rank"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [lib]
 # The `_lib` suffix may seem redundant but it is necessary
