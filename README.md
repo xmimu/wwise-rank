@@ -1,10 +1,10 @@
 # Wwise Rank
 
-> 为 Wwise 音频工程师设计的实时活动监控与积分悬浮窗
+> 为 Wwise 音频工程师设计的实时操作记录与积分悬浮窗
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Wwise Rank 是一款基于 Tauri 的轻量级桌面悬浮窗应用，通过 WAAPI（Wwise Authoring API）实时监听你在 Wwise 中的操作行为，并以游戏化积分的方式记录工作量，帮助你直观感知当前的工作节奏与效率。
+Wwise Rank 是一款基于 Tauri 的轻量级桌面悬浮窗应用，通过 WAAPI（Wwise Authoring API）接收 Wwise 的操作事件，并以游戏化积分的方式记录工作投入，帮助你直观感知当前的工作节奏与效率。
 
 ---
 
@@ -30,7 +30,15 @@ Wwise Rank 是一款基于 Tauri 的轻量级桌面悬浮窗应用，通过 WAAP
 
 ## 快速开始
 
-### 环境要求
+### 下载安装（推荐）
+
+前往 [Releases](../../releases/latest) 页面，下载最新版 `.msi` 安装包，双击安装后启动 `wwise-rank.exe` 即可。
+
+启动前请确保 Wwise 已开启并启用了 WAAPI（详见[用户手册 §2.3](docs/用户手册.md#23-启动前准备)）。
+
+### 从源码构建
+
+**环境要求：**
 
 | 工具 | 版本要求 |
 |------|----------|
@@ -39,14 +47,14 @@ Wwise Rank 是一款基于 Tauri 的轻量级桌面悬浮窗应用，通过 WAAP
 | pnpm | 8+ |
 | Wwise | 已启用 WAAPI（本地 WebSocket） |
 
-### 开发运行
+**开发运行：**
 
 ```bash
 pnpm install
 pnpm tauri dev
 ```
 
-### 构建发布包
+**构建发布包：**
 
 ```bash
 pnpm tauri build
