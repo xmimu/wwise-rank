@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, LogicalSize, Manager};
+use tauri_plugin_autostart::ManagerExt;
 use tokio::net::TcpStream;
 use tokio::sync::Notify;
 use tokio::time::{sleep, timeout, Duration, Instant};
@@ -546,6 +547,21 @@ fn get_default_settings() -> UserSettings {
 }
 
 #[tauri::command]
+fn get_autostart(app: tauri::AppHandle) -> Result<bool, String> {
+    app.autolaunch().is_enabled().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn set_autostart(enabled: bool, app: tauri::AppHandle) -> Result<(), String> {
+    let al = app.autolaunch();
+    if enabled {
+        al.enable().map_err(|e| e.to_string())
+    } else {
+        al.disable().map_err(|e| e.to_string())
+    }
+}
+
+#[tauri::command]
 fn reset_total_score(state: tauri::State<SharedState>, app: tauri::AppHandle) {
     let data_dir = match app.path().app_data_dir() {
         Ok(d) => d,
@@ -631,6 +647,7 @@ mod tests {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_autostart::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
@@ -682,6 +699,8 @@ pub fn run() {
             save_settings,
             reset_total_score,
             set_window_height,
+            get_autostart,
+            set_autostart,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

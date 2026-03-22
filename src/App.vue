@@ -4,6 +4,7 @@ import { getCurrentWindow, currentMonitor } from "@tauri-apps/api/window";
 import { PhysicalPosition } from "@tauri-apps/api/dpi";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { enable as autostartEnable, disable as autostartDisable, isEnabled as autostartIsEnabled } from "@tauri-apps/plugin-autostart";
 
 interface ScorePayload {
   total_score: number;
@@ -80,6 +81,19 @@ const t = computed(() => i18n[lang.value]);
 function setLang(l: Lang) {
   lang.value = l;
   localStorage.setItem("wwise-rank-lang", l);
+}
+
+// Autostart
+const autostartEnabled = ref(false);
+
+async function toggleAutostart() {
+  const next = !autostartEnabled.value;
+  if (next) {
+    await autostartEnable();
+  } else {
+    await autostartDisable();
+  }
+  autostartEnabled.value = next;
 }
 
 // Settings panel state
@@ -367,6 +381,8 @@ onMounted(async () => {
   const savedLang = localStorage.getItem("wwise-rank-lang") as Lang | null;
   if (savedLang === "zh" || savedLang === "en") lang.value = savedLang;
 
+  autostartEnabled.value = await autostartIsEnabled();
+
   unlistenMoved = await appWindow.onMoved(() => {
     if (snapTimer) clearTimeout(snapTimer);
     snapTimer = setTimeout(snapToEdge, 120);
@@ -568,6 +584,16 @@ function segClass(i: number, active: boolean) {
         >
           {{ resetConfirm ? t.resetConfirm : t.resetScore }}
         </button>
+      </div>
+
+      <!-- 开机自启 -->
+      <div class="s-section s-lang-section">
+        <div class="s-label">{{ lang === 'zh' ? '开机自启' : 'AUTO START' }}</div>
+        <div class="s-lang-toggle">
+          <button :class="['s-lang-btn', { active: autostartEnabled }]" @click="toggleAutostart">
+            {{ autostartEnabled ? (lang === 'zh' ? '已开启' : 'ON') : (lang === 'zh' ? '已关闭' : 'OFF') }}
+          </button>
+        </div>
       </div>
 
       <!-- 语言切换 -->
