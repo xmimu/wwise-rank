@@ -316,7 +316,7 @@ async fn subscribe_one(
 ) -> Option<SubscriptionHandle> {
     match timeout(
         subscribe_timeout,
-        client.subscribe(topic, None, move |_, _| {
+        client.subscribe(topic, None, move |_kwargs| {
             let mut st = shared.lock().unwrap_or_else(|e| e.into_inner());
             *st.score.event_counts.entry(topic.to_string()).or_insert(0) += 1;
             st.score.total_score += score;
