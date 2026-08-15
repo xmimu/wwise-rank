@@ -4570,13 +4570,12 @@ dependencies = [
 
 [[package]]
 name = "waapi-rs"
-version = "0.2.2"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a4a7567c75e2a3ef667aeb77068c018fc53063d9ad8912f9060f084b38305c7"
+checksum = "dc09e6af3e1a6a59915fefff376a97952b1da7066104cbde7f1f9e6cd08090ba"
 dependencies = [
  "futures-util",
  "log",
- "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",

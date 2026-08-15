@@ -57,6 +57,7 @@ const i18n = {
     portRangeError: "格式无效，请输入如 8080 或 8080-8090",
     portRangeLabel: "PORT RANGE",
     uriSubLabel: "URI SUBSCRIPTIONS",
+    retryTitle: "立即重试连接",
     resetScore: "RESET TOTAL SCORE",
     resetConfirm: "再次点击确认重置",
     restoreDefaultsTitle: "恢复默认设置",
@@ -69,6 +70,7 @@ const i18n = {
     portRangeError: "Invalid format, use e.g. 8080 or 8080-8090",
     portRangeLabel: "PORT RANGE",
     uriSubLabel: "URI SUBSCRIPTIONS",
+    retryTitle: "Retry connection now",
     resetScore: "RESET TOTAL SCORE",
     resetConfirm: "Click again to confirm reset",
     restoreDefaultsTitle: "Restore defaults",
@@ -351,6 +353,10 @@ async function applySettings() {
   await closeSettings();
 }
 
+async function retryConnection() {
+  await invoke("retry_connection");
+}
+
 async function resetToDefaults() {
   const defaults = await invoke<UserSettings>("get_default_settings");
   settingsDraft.value = defaults;
@@ -523,7 +529,15 @@ function segClass(i: number, active: boolean) {
 
       <!-- 操作按钮 -->
       <div class="actions">
-        <button class="btn-fill" @mousedown="createRipple">ANALYZE</button>
+        <button
+          v-if="connState === 'Idle'"
+          class="btn-fill"
+          :title="t.retryTitle"
+          @mousedown="createRipple"
+          @click="retryConnection"
+        >
+          RETRY
+        </button>
         <button class="btn-ghost" @mousedown="createRipple" @click="openSettings">SETTINGS</button>
       </div>
     </main>

@@ -533,6 +533,11 @@ fn save_settings(
 }
 
 #[tauri::command]
+fn retry_connection(reconnect: tauri::State<ReconnectSignal>) {
+    reconnect.notify_one();
+}
+
+#[tauri::command]
 fn set_window_height(height: f64, app: tauri::AppHandle) {
     if let Some(win) = app.get_webview_window("main") {
         // Clear any minimum-size constraint first so the window can shrink.
@@ -697,6 +702,7 @@ pub fn run() {
             get_settings,
             get_default_settings,
             save_settings,
+            retry_connection,
             reset_total_score,
             set_window_height,
             get_autostart,

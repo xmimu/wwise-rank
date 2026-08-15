@@ -23,6 +23,6 @@ tauri-plugin-opener = "2"
 tauri-plugin-autostart = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-waapi-rs = "0.2.2"
+waapi-rs = "0.3.0"
 tokio = { version = "1", features = ["full"] }
 sysinfo = "0.33"
