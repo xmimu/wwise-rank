@@ -1,6 +1,6 @@
 [package]
 name = "wwise-rank"
-version = "0.1.0"
+version = "0.1.1"
 description = "Real-time WAAPI activity monitor and gamified score overlay for Wwise audio engineers"
 authors = ["xmimu"]
 license = "MIT"

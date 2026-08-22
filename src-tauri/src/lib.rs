@@ -32,13 +32,34 @@ struct Config {
 
 impl Config {
     fn load_from_env() -> Self {
-        let tcp_probe_ms = std::env::var("WWAAPI_TCP_PROBE_MS").ok().and_then(|s| s.parse().ok()).unwrap_or(300u64);
-        let connect_secs = std::env::var("WWAAPI_CONNECT_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(4u64);
-        let getinfo_secs = std::env::var("WWAAPI_GETINFO_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(3u64);
-        let subscribe_secs = std::env::var("WWAAPI_SUBSCRIBE_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(5u64);
-        let disconnect_secs = std::env::var("WWAAPI_DISCONNECT_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(2u64);
-        let backoff_initial = std::env::var("WWAAPI_BACKOFF_INITIAL_MS").ok().and_then(|s| s.parse().ok()).unwrap_or(BACKOFF_INITIAL_MS);
-        let backoff_max = std::env::var("WWAAPI_BACKOFF_MAX_MS").ok().and_then(|s| s.parse().ok()).unwrap_or(BACKOFF_MAX_MS);
+        let tcp_probe_ms = std::env::var("WWAAPI_TCP_PROBE_MS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(300u64);
+        let connect_secs = std::env::var("WWAAPI_CONNECT_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(4u64);
+        let getinfo_secs = std::env::var("WWAAPI_GETINFO_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(3u64);
+        let subscribe_secs = std::env::var("WWAAPI_SUBSCRIBE_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(5u64);
+        let disconnect_secs = std::env::var("WWAAPI_DISCONNECT_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(2u64);
+        let backoff_initial = std::env::var("WWAAPI_BACKOFF_INITIAL_MS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(BACKOFF_INITIAL_MS);
+        let backoff_max = std::env::var("WWAAPI_BACKOFF_MAX_MS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(BACKOFF_MAX_MS);
 
         Config {
             tcp_probe_timeout: Duration::from_millis(tcp_probe_ms),
@@ -283,14 +304,15 @@ async fn tcp_open_ports_in_range(start: u16, end: u16, config: &Arc<Config>) -> 
     for port in start..=end {
         let probe_timeout = config.tcp_probe_timeout;
         join_handles.push(tokio::spawn(async move {
-            let ok = timeout(
-                probe_timeout,
-                TcpStream::connect(("127.0.0.1", port)),
-            )
-            .await
-            .map(|r| r.is_ok())
-            .unwrap_or(false);
-            if ok { Some(port) } else { None }
+            let ok = timeout(probe_timeout, TcpStream::connect(("127.0.0.1", port)))
+                .await
+                .map(|r| r.is_ok())
+                .unwrap_or(false);
+            if ok {
+                Some(port)
+            } else {
+                None
+            }
         }));
     }
 
@@ -322,7 +344,13 @@ async fn subscribe_one(
             st.score.total_score += score;
             st.score_dirty = true;
             st.session_score += score;
-            let boost: u32 = if st.recent_events < 8 { 3 } else if st.recent_events < 16 { 2 } else { 1 };
+            let boost: u32 = if st.recent_events < 8 {
+                3
+            } else if st.recent_events < 16 {
+                2
+            } else {
+                1
+            };
             st.recent_events = (st.recent_events + boost).min(24);
             emit_state(&app, &st);
         }),
@@ -357,7 +385,12 @@ async fn try_connect(
         _ => return None,
     };
 
-    match timeout(config.getinfo_timeout, client.call(ak::wwise::core::GET_INFO, None, None)).await {
+    match timeout(
+        config.getinfo_timeout,
+        client.call(ak::wwise::core::GET_INFO, None, None),
+    )
+    .await
+    {
         Ok(Ok(_)) => {}
         _ => {
             let _ = timeout(config.disconnect_timeout, client.disconnect()).await;
@@ -370,7 +403,10 @@ async fn try_connect(
     for &topic in TOPICS {
         // Look up this topic in user settings; skip if disabled.
         let topic_cfg = settings.topics.iter().find(|t| t.uri == topic);
-        let enabled = topic_cfg.map_or(true, |t| t.enabled);
+        let enabled = match topic_cfg {
+            Some(topic) => topic.enabled,
+            None => true,
+        };
         if !enabled {
             continue;
         }
@@ -414,7 +450,10 @@ async fn monitor_loop(
 
     loop {
         // Read current settings at the start of each cycle.
-        let settings = shared_settings.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let settings = shared_settings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
 
         // Backoff wait — wake immediately if settings change.
         tokio::select! {
@@ -424,7 +463,8 @@ async fn monitor_loop(
             }
         }
 
-        let candidates = tcp_open_ports_in_range(settings.port_start, settings.port_end, &config).await;
+        let candidates =
+            tcp_open_ports_in_range(settings.port_start, settings.port_end, &config).await;
         if candidates.is_empty() {
             set_conn_state(&shared, &app, ConnState::Idle);
             backoff_ms = next_backoff(backoff_ms, config.backoff_max_ms);
@@ -499,7 +539,10 @@ async fn monitor_loop(
 
 #[tauri::command]
 fn get_score(state: tauri::State<SharedState>) -> ScorePayload {
-    let st = match state.lock() { Ok(g) => g, Err(e) => e.into_inner() };
+    let st = match state.lock() {
+        Ok(g) => g,
+        Err(e) => e.into_inner(),
+    };
     ScorePayload {
         total_score: st.score.total_score,
         session_score: st.session_score,
@@ -584,6 +627,7 @@ fn reset_total_score(state: tauri::State<SharedState>, app: tauri::AppHandle) {
 // ── Tests ──────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
 
@@ -609,7 +653,10 @@ mod tests {
     fn score_config_defaults_covers_all_topics() {
         let defaults = ScoreConfig::defaults();
         for &topic in TOPICS {
-            assert!(defaults.contains_key(topic), "missing default score for '{topic}'");
+            assert!(
+                defaults.contains_key(topic),
+                "missing default score for '{topic}'"
+            );
         }
     }
 
@@ -639,10 +686,17 @@ mod tests {
         let loaded = UserSettings::load_or_default(&tmp);
         assert_eq!(loaded.port_start, 9090);
         // Custom score preserved
-        let created = loaded.topics.iter().find(|t| t.uri == "ak.wwise.core.object.created").unwrap();
+        let created = loaded
+            .topics
+            .iter()
+            .find(|t| t.uri == "ak.wwise.core.object.created")
+            .unwrap();
         assert_eq!(created.score, 99);
         // Missing topics filled in
-        assert!(loaded.topics.iter().any(|t| t.uri == ak::wwise::ui::SELECTION_CHANGED));
+        assert!(loaded
+            .topics
+            .iter()
+            .any(|t| t.uri == ak::wwise::ui::SELECTION_CHANGED));
         std::fs::remove_file(&tmp).ok();
     }
 }
