@@ -10,8 +10,16 @@ permissions:
 
 jobs:
   publish:
-    name: Build and publish Windows installer
-    runs-on: windows-latest
+    name: Build and publish ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: Windows installer
+          - os: macos-latest
+            platform: macOS installer
 
     steps:
       - uses: actions/checkout@v4

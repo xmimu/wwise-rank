@@ -40,7 +40,10 @@ Wwise Rank 是一款基于 Tauri 的轻量级桌面悬浮窗应用，通过 WAAP
 
 ### 下载安装（推荐）
 
-前往 [Releases](../../releases/latest) 页面，下载最新版 `.msi` 安装包，双击安装后启动 `wwise-rank.exe` 即可。
+前往 [Releases](../../releases/latest) 页面下载最新版安装包：
+
+- **Windows：** 下载 `.msi` 安装包，双击安装后启动 `wwise-rank.exe`。
+- **macOS：** 下载 `.dmg` 磁盘映像，打开后将 `wwise-rank.app` 拖入“应用程序”文件夹。
 
 启动前请确保 Wwise 已开启并启用了 WAAPI（详见[用户手册 §2.3](docs/用户手册.md#23-启动前准备)）。
 
